@@ -9,46 +9,92 @@ module uart_rx #(
     output reg        data_valid  // High when new data is received
 );
 
-    localparam BAUD_TICK = CLK_FREQ / BAUD_RATE;  // Clock ticks per bit
-    reg [15:0] baud_counter = 0;
-    reg [3:0] bit_index = 0;
-    reg [7:0] shift_reg = 0;
-    reg receiving = 0;
+    // States
+    localparam IDLE = 2'd0;
+    localparam DATA = 2'd1;
+    localparam STOP = 2'd2;
+    localparam COMPLETE = 2'd3;
+
+    // Calculate baud rate divider
+    localparam BAUD_TICK = CLK_FREQ / BAUD_RATE;
+
+    // Registers
+    reg [15:0] counter;
+    reg [ 1:0] state;
+    reg [ 3:0] bits;
+    reg [ 7:0] shift_reg;
+
+    // Initialize values
+    initial begin
+        counter = 0;
+        state = IDLE;
+        bits = 0;
+        shift_reg = 0;
+        data = 0;
+        data_valid = 0;
+    end
 
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            baud_counter <= 0;
-            bit_index <= 0;
+            counter <= 0;
+            state <= IDLE;
+            bits <= 0;
             shift_reg <= 0;
-            receiving <= 0;
+            data <= 0;
             data_valid <= 0;
         end else begin
-            // Auto-clear data_valid after one clock cycle
+            // Default state for data_valid (auto-clear after one cycle)
             if (data_valid) data_valid <= 0;
 
-            if (!receiving) begin
-                if (!rx) begin  // Start bit detected (rx goes low)
-                    receiving <= 1;
-                    baud_counter <= BAUD_TICK / 2;  // Sample in middle of bit
-                    bit_index <= 0;
-                end
-            end else begin
-                baud_counter <= baud_counter - 1;
-                if (baud_counter == 0) begin
-                    baud_counter <= BAUD_TICK;
-                    if (bit_index < 8) begin
-                        shift_reg[bit_index] <= rx;  // Store received bit
-                        bit_index <= bit_index + 1;
-                    end else begin
-                        // Check for stop bit (should be high)
-                        if (rx) begin  // Valid stop bit
-                            data <= shift_reg;  // Store final byte
-                            data_valid <= 1;  // Indicate new data for one clock cycle
-                        end
-                        receiving <= 0;
+            case (state)
+                IDLE: begin
+                    if (rx == 0) begin  // Start bit detected
+                        counter <= 0;
+                        bits <= 0;
+                        state <= DATA;
                     end
                 end
-            end
+
+                DATA: begin
+                    if (counter < BAUD_TICK - 1) begin
+                        counter <= counter + 1;
+                    end else begin
+                        counter <= 0;
+                        // Sample in the middle of the bit
+                        if (counter == BAUD_TICK / 2) begin
+                            // Shift in new bit (LSB first)
+                            shift_reg <= {rx, shift_reg[7:1]};
+                            bits <= bits + 1;
+
+                            // Check if we've received all 8 bits
+                            if (bits == 7) begin
+                                state <= STOP;
+                            end
+                        end
+                    end
+                end
+
+                STOP: begin
+                    if (counter < BAUD_TICK - 1) begin
+                        counter <= counter + 1;
+                    end else begin
+                        // Check for valid stop bit
+                        if (rx == 1) begin
+                            data  <= shift_reg;  // Update output data
+                            state <= COMPLETE;
+                        end else begin
+                            // Invalid stop bit (framing error)
+                            state <= IDLE;
+                        end
+                        counter <= 0;
+                    end
+                end
+
+                COMPLETE: begin
+                    data_valid <= 1;  // Signal data is valid for one clock cycle
+                    state <= IDLE;  // Return to idle state for next byte
+                end
+            endcase
         end
     end
 endmodule
